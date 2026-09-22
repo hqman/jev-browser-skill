@@ -301,8 +301,10 @@ async function observeDocument(page: Page) {
 								["text", "search", "email", "url", "tel", "number"].includes(
 									e.type,
 								)));
+					// An editable field is reached through TYPE_TEXT (execute focuses
+					// it); offering CLICK too invites click-the-field-again loops.
 					if (editable) add("TYPE_TEXT");
-					if (!(editable && value.trim())) add("CLICK");
+					else add("CLICK");
 				}
 			}
 			const words: string[] = [];

@@ -661,8 +661,8 @@ test("browser loop and stale-target guards (offline)", async (t) => {
 					const origin = snapshot.data.targets.filter(
 						(t) => t.label === "Origin",
 					);
-					assert.equal(origin.length, 2);
-					assert.equal(origin[0].id, origin[1].id);
+					assert.equal(origin.length, 1);
+					assert.equal(origin[0].operation, "TYPE_TEXT");
 					const option = snapshot.data.targets.find(
 						(t) => t.operation === "SELECT",
 					);
