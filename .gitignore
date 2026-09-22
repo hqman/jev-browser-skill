@@ -2,6 +2,8 @@ node_modules
 dist
 coverage
 .env
+.env.*
+.DS_Store
 artifacts
 screenshots
 videos
@@ -10,3 +12,6 @@ videos
 .playwright
 playwright/.cache
 .cache/ms-playwright
+demo/
+output/
+execplan/

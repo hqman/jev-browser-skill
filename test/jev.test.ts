@@ -8,7 +8,12 @@ import {
 	type JevPolicy,
 	TYPESAFE_SYSTEMONE_URL,
 } from "../src/jev-model.ts";
-import { isRevisitedHref, type RunStep, runJev } from "../src/jev-run.ts";
+import {
+	isRevisitedHref,
+	type RunMemory,
+	type RunStep,
+	runJev,
+} from "../src/jev-run.ts";
 
 const observation: Observation = {
 	url: "https://example.test",
@@ -85,6 +90,33 @@ test("one question compares concrete actions against scrolling and terminal choi
 			"DONE",
 		),
 	);
+});
+
+test("populated query fields offer ENTER", () => {
+	const q = buildQuestions(
+		{
+			...observation,
+			targets: [
+				{
+					id: "1",
+					operation: "TYPE_TEXT",
+					label: "Search or jump to",
+					value: "JevScout",
+					role: "combobox",
+				},
+			],
+		},
+		"Find JevScout",
+	);
+	assert.ok(Object.hasOwn(q.action.criteria, "ENTER"));
+	assert.ok(Object.hasOwn(q.action.criteria, "TYPE_TEXT:1"));
+});
+
+test("recent TYPE_TEXT history offers ENTER even if the snapshot value is empty", () => {
+	const q = buildQuestions(observation, "Find cats", [
+		{ action: "Query", kind: "TYPE_TEXT", text: "cats", page_changed: true },
+	]);
+	assert.ok(Object.hasOwn(q.action.criteria, "ENTER"));
 });
 
 describe("Jev providers (offline fetch mocks)", { concurrency: false }, () => {
@@ -256,7 +288,7 @@ test("browser loop and stale-target guards (offline)", async (t) => {
 				await fixture();
 				let calls = 0;
 				const recorded: RunStep[] = [];
-				const memory = { goal: "Search for cats", actions: [] };
+				const memory: RunMemory = { goal: "Search for cats", actions: [] };
 				const policy: JevPolicy = {
 					async choose(data) {
 						assert.equal(
@@ -312,6 +344,84 @@ test("browser loop and stale-target guards (offline)", async (t) => {
 					recorded.map((s) => s.status),
 					["decision", "decision", "attempted", "executed", "decision"],
 				);
+			},
+		);
+		await t.test(
+			"filled search combobox is not offered as CLICK",
+			async () => {
+				await page.setContent(
+					'<input role="combobox" aria-label="Search or jump to" value="JevScout">',
+				);
+				const snapshot = await observe(page);
+				try {
+					const search = snapshot.data.targets.filter(
+						(t) => t.label === "Search or jump to",
+					);
+					assert.ok(search.some((t) => t.operation === "TYPE_TEXT"));
+					assert.equal(
+						search.some((t) => t.operation === "CLICK"),
+						false,
+					);
+				} finally {
+					await snapshot.dispose();
+				}
+			},
+		);
+		await t.test(
+			"after typing, ENTER submits a combobox that has no Search button",
+			async () => {
+				await page.setContent(`<!doctype html>
+					<input id="query" role="combobox" aria-label="Search or jump to">
+					<p id="result"></p>
+					<script>
+						document.querySelector("#query").addEventListener("keydown", (event) => {
+							if (event.key !== "Enter") return;
+							event.preventDefault();
+							document.querySelector("#result").textContent = event.target.value;
+						});
+					</script>`);
+				let calls = 0;
+				const memory: RunMemory = { goal: "Find JevScout", actions: [] };
+				const policy: JevPolicy = {
+					async choose(data) {
+						calls++;
+						if (calls === 1)
+							return {
+								operation: "TYPE_TEXT",
+								probability: 1,
+								target: data.targets.find((t) => t.operation === "TYPE_TEXT"),
+							};
+						if (calls === 2) {
+							assert.equal(
+								data.targets.some(
+									(t) =>
+										t.operation === "CLICK" &&
+										t.label === "Search or jump to",
+								),
+								false,
+							);
+							return { operation: "ENTER", probability: 1 };
+						}
+						assert.match(data.text, /JevScout/);
+						return { operation: "DONE", probability: 1 };
+					},
+				};
+				const paused = await runJev(
+					{ goal: "Find JevScout" },
+					{ page: () => page, policy, memory },
+				);
+				assert.equal(paused.status, "needs_text");
+				const result = await runJev(
+					{ goal: "Find JevScout" },
+					{
+						page: () => page,
+						policy,
+						memory,
+						textReply: "JevScout",
+					},
+				);
+				assert.equal(result.status, "done_unverified");
+				assert.equal(await page.locator("#result").textContent(), "JevScout");
 			},
 		);
 		await t.test(

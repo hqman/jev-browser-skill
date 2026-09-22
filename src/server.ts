@@ -1,13 +1,10 @@
-import { mkdir, unlink, writeFile } from "node:fs/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { chmod, lstat, mkdir, rmdir, unlink, writeFile } from "node:fs/promises";
 import net from "node:net";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { daemonConfigFingerprint } from "./daemon-identity.ts";
+import { JB_DIR, LOCK_PATH, PID_PATH, SOCK_PATH } from "./ipc.ts";
 import { JevBrowserManager } from "./runtime.ts";
 import type { BrowserAction } from "./types.ts";
-
-export const JB_DIR = join(homedir(), ".jb");
-export const SOCK_PATH = join(JB_DIR, "jb.sock");
-export const PID_PATH = join(JB_DIR, "jb.pid");
 
 type JsonObject = Record<string, unknown>;
 
@@ -16,6 +13,7 @@ interface RpcRequest {
 	method?: unknown;
 	session?: unknown;
 	params?: unknown;
+	daemonFingerprint?: unknown;
 }
 
 interface HostUpdate {
@@ -30,7 +28,12 @@ const knownSessions = new Set<string>(["default"]);
 
 let server: net.Server | undefined;
 let exiting = false;
-let currentClient: { socket: net.Socket; id: string } | undefined;
+let cleanupStarted = false;
+let ownsRuntimeLock = false;
+let ownsRuntimeFiles = false;
+const ownFingerprint = daemonConfigFingerprint();
+const requests = new AsyncLocalStorage<{ socket: net.Socket; id: string; active: boolean }>();
+const pending = new Set<Promise<unknown>>();
 
 function errCode(err: unknown): string | undefined {
 	if (err && typeof err === "object" && "code" in err) {
@@ -91,8 +94,8 @@ function installHostBridge(): void {
 	};
 	host.__jbHost = {
 		emitEvent(name, body) {
-			const client = currentClient;
-			if (!client || name !== "jev_browser_update") return;
+			const client = requests.getStore();
+			if (!client?.active || name !== "jev_browser_update") return;
 			const update = (body ?? {}) as HostUpdate;
 			const type = update.type;
 			if (!type) return;
@@ -122,13 +125,14 @@ async function unlinkIfPresent(path: string): Promise<void> {
 }
 
 async function cleanupAndExit(code = 0): Promise<void> {
-	if (exiting) return;
+	if (cleanupStarted) return;
+	cleanupStarted = true;
 	exiting = true;
-	currentClient = undefined;
-	// Drop the socket first so a following `jb run` cannot attach to this
-	// process while it is still tearing down the browser.
-	await unlinkIfPresent(SOCK_PATH).catch(() => undefined);
-	await unlinkIfPresent(PID_PATH).catch(() => undefined);
+	for (const sessionId of [...knownSessions]) {
+		await manager.stop({ sessionId }).catch(() => undefined);
+	}
+	// A browser may still have been starting when stop was first requested.
+	await Promise.allSettled([...pending]);
 	for (const sessionId of [...knownSessions]) {
 		await manager.stop({ sessionId }).catch(() => undefined);
 	}
@@ -143,7 +147,23 @@ async function cleanupAndExit(code = 0): Promise<void> {
 			resolve();
 		});
 	});
+	// The exclusive lifecycle lock remains held while listen is released and
+	// the published names are removed. Once the lock is released this process
+	// never touches runtime paths again, so a replacement daemon cannot lose
+	// its socket or pid file to an older process finishing cleanup.
+	await removeOwnRuntimeFiles().catch(() => undefined);
 	process.exit(code);
+}
+
+async function removeOwnRuntimeFiles(): Promise<void> {
+	if (!ownsRuntimeLock) return;
+	if (ownsRuntimeFiles) {
+		await unlinkIfPresent(SOCK_PATH);
+		await unlinkIfPresent(PID_PATH);
+		ownsRuntimeFiles = false;
+	}
+	await rmdir(LOCK_PATH);
+	ownsRuntimeLock = false;
 }
 
 async function dispatch(
@@ -198,8 +218,9 @@ async function dispatch(
 			);
 		}
 		case "stop":
-		case "shutdown":
 			return manager.stop(context);
+		case "shutdown":
+			return { shuttingDown: true };
 		default:
 			throw new Error(`unknown method: ${method}`);
 	}
@@ -209,6 +230,9 @@ async function handleRequest(socket: net.Socket, line: string): Promise<void> {
 	let req: RpcRequest;
 	try {
 		req = JSON.parse(line) as RpcRequest;
+		if (!req || typeof req !== "object" || Array.isArray(req)) {
+			throw new Error("request must be an object");
+		}
 	} catch (err) {
 		writeJson(socket, {
 			id: "?",
@@ -227,13 +251,33 @@ async function handleRequest(socket: net.Socket, line: string): Promise<void> {
 		req.params && typeof req.params === "object" && !Array.isArray(req.params)
 			? (req.params as JsonObject)
 			: {};
+	const fingerprint =
+		typeof req.daemonFingerprint === "string" ? req.daemonFingerprint : "";
 
-	currentClient = { socket, id };
+	const client = { socket, id, active: true };
 	try {
+		if (exiting) throw new Error("Daemon is shutting down.");
 		if (!method) throw new Error("missing method");
-		const data = await dispatch(method, params, sessionId);
+		if (
+			method !== "stop" &&
+			method !== "shutdown" &&
+			fingerprint !== ownFingerprint
+		) {
+			throw new Error(
+				"This jb daemon was started with different provider, credential, or config settings. Run `jb shutdown`, then retry so a daemon starts with the current settings.",
+			);
+		}
+		if (method === "shutdown") exiting = true;
+		const work = requests.run(client, () => dispatch(method, params, sessionId));
+		pending.add(work);
+		let data: unknown;
+		try {
+			data = await work;
+		} finally {
+			pending.delete(work);
+		}
 		await writeJsonFlushed(socket, { id, type: "result", ok: true, data });
-		if (method === "stop" || method === "shutdown") {
+		if (method === "shutdown") {
 			socket.end();
 			await cleanupAndExit(0);
 		}
@@ -245,17 +289,20 @@ async function handleRequest(socket: net.Socket, line: string): Promise<void> {
 			message: errMessage(err),
 		});
 	} finally {
-		if (currentClient?.socket === socket && currentClient.id === id) {
-			currentClient = undefined;
-		}
+		client.active = false;
 	}
 }
 
 function attachSocket(socket: net.Socket): void {
+	socket.setEncoding("utf8");
 	let buf = "";
 	let queue = Promise.resolve();
 	socket.on("data", (chunk) => {
 		buf += chunk.toString("utf8");
+		if (Buffer.byteLength(buf) > 1024 * 1024) {
+			socket.destroy();
+			return;
+		}
 		let nl = buf.indexOf("\n");
 		while (nl >= 0) {
 			const line = buf.slice(0, nl).trim();
@@ -279,23 +326,59 @@ function attachSocket(socket: net.Socket): void {
 }
 
 export async function startDaemon(): Promise<void> {
-	await mkdir(JB_DIR, { recursive: true });
-	await unlinkIfPresent(SOCK_PATH);
+	process.umask(0o077);
+	await mkdir(JB_DIR, { recursive: true, mode: 0o700 });
+	const directory = await lstat(JB_DIR);
+	if (!directory.isDirectory() || directory.isSymbolicLink() ||
+		(process.getuid && directory.uid !== process.getuid())) {
+		throw new Error("Runtime directory must be an owned directory, not a symlink.");
+	}
+	await chmod(JB_DIR, 0o700);
+	try {
+		await mkdir(LOCK_PATH, { mode: 0o700 });
+		ownsRuntimeLock = true;
+	} catch (err) {
+		if (errCode(err) === "EEXIST") {
+			throw new Error(
+				`Daemon lifecycle lock is already held at ${LOCK_PATH}. Another jb daemon may be starting, running, or shutting down. This process will not remove runtime files. If no jb process is alive, remove ${LOCK_PATH}, ${SOCK_PATH}, and ${PID_PATH} yourself.`,
+			);
+		}
+		throw err;
+	}
 	installHostBridge();
 
 	server = net.createServer(attachSocket);
 
-	await new Promise<void>((resolve, reject) => {
-		server!.once("error", (err) => {
-			if (errCode(err) === "EADDRINUSE") {
-				process.exit(0);
-			}
-			reject(err);
+	// Bind the existing path. Do not unlink it first: a second process would
+	// steal the name and leave the first daemon running with no clients.
+	try {
+		await new Promise<void>((resolve, reject) => {
+			server!.once("error", (err) => {
+				if (errCode(err) === "EADDRINUSE") {
+					reject(
+						new Error(
+							`Daemon socket is already in use at ${SOCK_PATH}. Another jb daemon may still be running (see ${PID_PATH}). This process will not remove the socket or the pid file. If that process is not alive, remove ${LOCK_PATH}, ${SOCK_PATH}, and ${PID_PATH} yourself and start again.`,
+						),
+					);
+					return;
+				}
+				reject(err);
+			});
+			server!.listen(SOCK_PATH, () => resolve());
 		});
-		server!.listen(SOCK_PATH, () => resolve());
-	});
-
-	await writeFile(PID_PATH, `${process.pid}\n`);
+		ownsRuntimeFiles = true;
+		await chmod(SOCK_PATH, 0o600);
+		await writeFile(PID_PATH, `${process.pid}\n`, { mode: 0o600 });
+	} catch (error) {
+		if (ownsRuntimeLock) {
+			await new Promise<void>((resolve) => {
+				if (!server?.listening) return resolve();
+				server.close(() => resolve());
+			});
+			await removeOwnRuntimeFiles().catch(() => undefined);
+		}
+		throw error;
+	}
 
 	const onSignal = () => {
 		void cleanupAndExit(0);

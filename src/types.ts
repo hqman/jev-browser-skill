@@ -1,4 +1,4 @@
-import type { Browser, BrowserContext, Page, Video } from "playwright";
+import type { Browser, BrowserContext, CDPSession, Page, Video } from "playwright";
 
 export interface JevBrowserConfig {
 	allowedOrigins: string[];
@@ -68,6 +68,9 @@ export interface ActiveBrowserSession {
 	logs: BrowserLogEntry[];
 	nextLogId: number;
 	stream?: StreamController;
+	streamStarting?: Promise<StreamController>;
+	streamStopRequested?: boolean;
+	navigationGuards?: WeakMap<Page, Promise<CDPSession>>;
 }
 
 export interface StreamController {

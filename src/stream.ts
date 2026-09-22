@@ -7,6 +7,36 @@ export async function startStream(
 	options: { intervalMs: number },
 ): Promise<StreamController> {
 	if (session.stream) return session.stream;
+	if (session.streamStarting) return session.streamStarting;
+	session.streamStopRequested = false;
+	const starting = createStream(session, options);
+	session.streamStarting = starting;
+	try {
+		const controller = await starting;
+		if (session.streamStopRequested) {
+			await controller.stop();
+			throw new Error("Stream start was cancelled.");
+		}
+		session.stream = controller;
+		return controller;
+	} finally {
+		if (session.streamStarting === starting) session.streamStarting = undefined;
+	}
+}
+
+export async function stopStream(session: ActiveBrowserSession): Promise<void> {
+	session.streamStopRequested = true;
+	await session.streamStarting?.catch(() => undefined);
+	const stream = session.stream;
+	session.stream = undefined;
+	if (stream) await stream.stop();
+	session.streamStopRequested = false;
+}
+
+async function createStream(
+	session: ActiveBrowserSession,
+	options: { intervalMs: number },
+): Promise<StreamController> {
 
 	const token = randomBytes(18).toString("base64url");
 	const clients = new Set<ServerResponse>();
@@ -113,7 +143,6 @@ export async function startStream(
 			await new Promise<void>((resolve) => server.close(() => resolve()));
 		},
 	};
-	session.stream = controller;
 	return controller;
 }
 

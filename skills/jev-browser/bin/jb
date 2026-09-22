@@ -1,0 +1,27 @@
+#!/usr/bin/env node
+import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
+
+const [major = 0, minor = 0] = process.versions.node.split(".").map(Number);
+if (!(major > 22 || (major === 22 && minor >= 18))) {
+	console.error(
+		`jb requires Node.js >= 22.18.0 for TypeScript type stripping (this process is ${process.versions.node}).`,
+	);
+	process.exit(1);
+}
+
+const skillBin = dirname(realpathSync(process.argv[1]));
+const repoJb = join(skillBin, "..", "..", "..", "bin", "jb");
+const child = spawn(repoJb, process.argv.slice(2), { stdio: "inherit" });
+child.on("error", (err) => {
+	console.error(`jb launcher could not start ${repoJb}: ${err.message}`);
+	process.exit(1);
+});
+child.on("exit", (code, signal) => {
+	if (signal) {
+		process.kill(process.pid, signal);
+		return;
+	}
+	process.exit(code ?? 1);
+});

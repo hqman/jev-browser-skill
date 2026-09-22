@@ -2,8 +2,37 @@ This work is derived from the Cline plugin `jev-browser` in the cline/plugins
 repository (https://github.com/cline/plugins) at commit
 96bde661f630ec23c1ce0cd86a2361a9959ef65a ("Add Jev Browser plugin (#230)").
 
-The original plugin is licensed under the Apache License, Version 2.0.
-Copyright 2026 Cline Bot Inc.
+At that commit the license declarations disagree. This repository does not
+treat them as a dual license, and it does not decide which one applies.
 
-This distribution is also licensed under the Apache License, Version 2.0.
-Copyright 2026 hqman.
+- The repository root LICENSE is the Apache License, Version 2.0.
+  Copyright 2026 Cline Bot Inc.
+  https://github.com/cline/plugins/blob/96bde661f630ec23c1ce0cd86a2361a9959ef65a/LICENSE
+  sha256 f704446a5f1271608805598b557e4288cf8580477ea038c9c3d8b361f693f6b8
+
+- plugins/jev-browser/package.json sets "license" to "MIT".
+  That directory has no LICENSE or NOTICE file.
+  https://github.com/cline/plugins/blob/96bde661f630ec23c1ce0cd86a2361a9959ef65a/plugins/jev-browser/package.json
+  sha256 0933e0aa3cfda35ad97751c56dacb9d2e9413ad2ac580d25d1a959b32e29640e
+
+Publication stays blocked until Cline clarifies which license applies to the
+plugin at that commit. The draft question is below. It has not been filed.
+
+The LICENSE file in this repository is the Apache-2.0 text with
+"Copyright 2026 hqman". That line covers material written for this
+repository. It is not a determination of the upstream plugin's license.
+In-file modification notices for the copied sources are intentionally
+absent until that determination exists. If upstream confirms Apache-2.0,
+each modified file still needs the notice required by section 4(b).
+
+Copied, modified, and added files are listed in CHANGES.md.
+
+Draft question for https://github.com/cline/plugins/issues :
+
+Title: Which license applies to plugins/jev-browser at 96bde661?
+
+At commit 96bde661f630ec23c1ce0cd86a2361a9959ef65a the repository root
+LICENSE is Apache-2.0, Copyright 2026 Cline Bot Inc. The plugin file
+plugins/jev-browser/package.json sets "license" to "MIT", and that
+directory contains no LICENSE or NOTICE. Which license applies to the
+Jev Browser plugin at that commit?

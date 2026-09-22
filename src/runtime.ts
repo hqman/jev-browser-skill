@@ -2,13 +2,19 @@ import { waitForDocument } from "./jev-browser.ts";
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { type Browser, chromium, type Page } from "playwright";
+import {
+	type Browser,
+	type BrowserContext,
+	type CDPSession,
+	chromium,
+	type Page,
+} from "playwright";
 import { executeActions } from "./actions.ts";
 import { ensureChromium } from "./browser-setup.ts";
 import { isUrlAllowed, readConfig } from "./config.ts";
 import { type RunInput, type RunMemory, runJev } from "./jev-run.ts";
 import { installRecordingOverlay } from "./recording-overlay.ts";
-import { startStream } from "./stream.ts";
+import { startStream, stopStream } from "./stream.ts";
 import type {
 	ActiveBrowserSession,
 	BrowserAction,
@@ -33,6 +39,7 @@ export class JevBrowserManager {
 	private readonly sessions = new Map<string, ActiveBrowserSession>();
 	private readonly jevMemory = new WeakMap<ActiveBrowserSession, RunMemory>();
 	private readonly running = new Map<string, AbortController>();
+	private readonly starting = new Map<string, Promise<unknown>>();
 
 	private async startBrowser(
 		input: {
@@ -43,9 +50,11 @@ export class JevBrowserManager {
 			showClickIndicators?: boolean;
 		},
 		context: ToolContext,
+		signal: AbortSignal,
 	) {
 		const key = sessionKey(context);
 		await this.stopByKey(key).catch(() => undefined);
+		signal.throwIfAborted();
 		const config = readConfig();
 		const url = input.url?.trim() || "about:blank";
 		assertUrlAllowed(url, config);
@@ -75,56 +84,63 @@ export class JevBrowserManager {
 		};
 		let actualHeadless = requestedHeadless;
 		let launchWarning: string | undefined;
-		let browser: Browser;
+		let browser: Browser | undefined;
+		let browserContext: BrowserContext | undefined;
+		let session: ActiveBrowserSession | undefined;
 		try {
-			browser = await chromium.launch({
-				...launchOptions,
-				headless: requestedHeadless,
+			try {
+				browser = await chromium.launch({
+					...launchOptions,
+					headless: requestedHeadless,
+				});
+			} catch (error) {
+				if (process.platform !== "darwin" || !requestedHeadless) throw error;
+				// Headless Chromium may be rejected by the macOS app sandbox even though
+				// a normal browser window is allowed. Fall back instead of consuming the
+				// entire plugin call timeout.
+				browser = await chromium.launch({ ...launchOptions, headless: false });
+				actualHeadless = false;
+				launchWarning =
+					"Headless Chromium was unavailable, so a visible browser window was started.";
+			}
+			signal.throwIfAborted();
+			browserContext = await browser.newContext({
+				viewport: config.viewport,
+				acceptDownloads: false,
+				serviceWorkers: "block",
+				...((input.recordVideo ?? config.recordVideo)
+					? {
+							recordVideo: {
+								dir: join(outputDir, "videos"),
+								size: config.viewport,
+							},
+						}
+					: {}),
 			});
-		} catch (error) {
-			if (process.platform !== "darwin" || !requestedHeadless) throw error;
-			// Headless Chromium may be rejected by the macOS app sandbox even though
-			// a normal browser window is allowed. Fall back instead of consuming the
-			// entire plugin call timeout.
-			browser = await chromium.launch({ ...launchOptions, headless: false });
-			actualHeadless = false;
-			launchWarning =
-				"Headless Chromium was unavailable, so a visible browser window was started.";
-		}
-		const browserContext = await browser.newContext({
-			viewport: config.viewport,
-			acceptDownloads: false,
-			serviceWorkers: "block",
-			...((input.recordVideo ?? config.recordVideo)
-				? {
-						recordVideo: {
-							dir: join(outputDir, "videos"),
-							size: config.viewport,
-						},
-					}
-				: {}),
-		});
-		await installRecordingOverlay(browserContext, {
-			showCursor: input.showCursor ?? config.showCursor,
-			showClickIndicators:
-				input.showClickIndicators ?? config.showClickIndicators,
-		});
-		const page = await browserContext.newPage();
-		const session: ActiveBrowserSession = {
-			browser,
-			context: browserContext,
-			page,
-			video: page.video() ?? undefined,
-			id,
-			outputDir,
-			startedAt: new Date().toISOString(),
-			logs: [],
-			nextLogId: 1,
-		};
-		this.sessions.set(key, session);
-		this.attachObservability(session, config);
-
-		try {
+			signal.throwIfAborted();
+			await installRecordingOverlay(browserContext, {
+				showCursor: input.showCursor ?? config.showCursor,
+				showClickIndicators:
+					input.showClickIndicators ?? config.showClickIndicators,
+			});
+			signal.throwIfAborted();
+			const page = await browserContext.newPage();
+			signal.throwIfAborted();
+			session = {
+				browser,
+				context: browserContext,
+				page,
+				video: page.video() ?? undefined,
+				id,
+				outputDir,
+				startedAt: new Date().toISOString(),
+				logs: [],
+				nextLogId: 1,
+				navigationGuards: new WeakMap(),
+			};
+			this.sessions.set(key, session);
+			await this.attachObservability(session, config);
+			signal.throwIfAborted();
 			if (url !== "about:blank")
 				await page.goto(url, {
 					waitUntil: "domcontentloaded",
@@ -132,8 +148,13 @@ export class JevBrowserManager {
 				});
 			if (config.stream.enabled)
 				await this.startStreamForSession(session, config.stream.intervalMs);
+			signal.throwIfAborted();
 		} catch (error) {
-			await this.stopByKey(key).catch(() => undefined);
+			if (session && this.sessions.get(key) === session)
+				this.sessions.delete(key);
+			if (session) await settleWithin(stopStream(session), 3_000);
+			await settleWithin(browserContext?.close(), 8_000);
+			await settleWithin(browser?.close(), 3_000);
 			throw error;
 		}
 
@@ -209,7 +230,15 @@ export class JevBrowserManager {
 		const controller = new AbortController();
 		this.running.set(key, controller);
 		try {
-			if (!this.sessions.has(key)) await this.startBrowser(input, context);
+			if (!this.sessions.has(key)) {
+				const starting = this.startBrowser(input, context, controller.signal);
+				this.starting.set(key, starting);
+				try {
+					await starting;
+				} finally {
+					if (this.starting.get(key) === starting) this.starting.delete(key);
+				}
+			}
 			else if (input.url) {
 				assertUrlAllowed(input.url, readConfig());
 				await this.requireSession(context).page.goto(input.url, {
@@ -263,10 +292,11 @@ export class JevBrowserManager {
 		controller.signal.throwIfAborted();
 		const session = this.requireSession(context);
 		const tracePath = join(session.outputDir, `jev-${randomUUID()}.jsonl`);
-		const initial = await this.screenshot(
-			{ label: "jev-initial" },
-			context,
-		).catch(() => undefined);
+		const initial = input.textReply
+			? undefined
+			: await this.screenshot({ label: "jev-initial" }, context).catch(
+					() => undefined,
+				);
 		const memory = this.jevMemory.get(session) ?? {
 			goal: input.goal,
 			actions: [],
@@ -294,8 +324,20 @@ export class JevBrowserManager {
 		} catch {
 			/* Browser may have been stopped during cancellation. */
 		}
+		if (final?.state.currentUrl) {
+			await appendFile(
+				tracePath,
+				`${JSON.stringify({
+					type: "found",
+					url: final.state.currentUrl,
+					title: final.state.pageTitle,
+				})}\n`,
+			);
+		}
 		return {
 			...result,
+			url: final?.state.currentUrl,
+			title: final?.state.pageTitle,
 			tracePath,
 			initialScreenshot: initial
 				? {
@@ -351,8 +393,7 @@ export class JevBrowserManager {
 	) {
 		const session = this.requireSession(context);
 		if (input.action === "stop") {
-			await session.stream?.stop();
-			session.stream = undefined;
+			await stopStream(session);
 			return { active: false };
 		}
 		if (input.action === "start" && !session.stream) {
@@ -368,8 +409,10 @@ export class JevBrowserManager {
 	}
 
 	async stop(context: ToolContext) {
-		this.running.get(sessionKey(context))?.abort();
-		return this.stopByKey(sessionKey(context));
+		const key = sessionKey(context);
+		this.running.get(key)?.abort();
+		await this.starting.get(key)?.catch(() => undefined);
+		return this.stopByKey(key);
 	}
 
 	private async stopByKey(key: string) {
@@ -380,7 +423,7 @@ export class JevBrowserManager {
 				message: "No browser is active for this session.",
 			};
 		this.sessions.delete(key);
-		await settleWithin(session.stream?.stop(), 3_000);
+		await settleWithin(stopStream(session), 3_000);
 		await settleWithin(session.context.close(), 8_000);
 		let videoPath: string | undefined;
 		try {
@@ -427,7 +470,7 @@ export class JevBrowserManager {
 		};
 	}
 
-	private attachObservability(
+	private async attachObservability(
 		session: ActiveBrowserSession,
 		config: JevBrowserConfig,
 	) {
@@ -445,6 +488,9 @@ export class JevBrowserManager {
 				});
 				await route.abort("blockedbyclient");
 				return;
+			}
+			if (request.isNavigationRequest()) {
+				await this.ensureNavigationGuard(session, request.frame().page(), config);
 			}
 			await route.continue();
 		});
@@ -493,10 +539,60 @@ export class JevBrowserManager {
 			});
 		};
 		attachPage(session.page);
+		await this.ensureNavigationGuard(session, session.page, config);
 		session.context.on("page", (page) => {
 			attachPage(page);
+			void this.ensureNavigationGuard(session, page, config).catch(() =>
+				page.close().catch(() => undefined),
+			);
 			session.page = page;
 		});
+	}
+
+	private ensureNavigationGuard(
+		session: ActiveBrowserSession,
+		page: Page,
+		config: JevBrowserConfig,
+	): Promise<CDPSession> {
+		const existing = session.navigationGuards?.get(page);
+		if (existing) return existing;
+		const installing = (async () => {
+			const cdp = await session.context.newCDPSession(page);
+			cdp.on("Fetch.requestPaused", (event) => {
+				const allowed = isUrlAllowed(event.request.url, config.allowedOrigins);
+				if (!allowed) {
+					this.addLog(session, {
+						type: "security",
+						level: "blocked",
+						text: "Blocked navigation outside allowedOrigins.",
+						url: event.request.url,
+					});
+				}
+				void cdp
+					.send(
+						allowed ? "Fetch.continueRequest" : "Fetch.failRequest",
+						allowed
+							? { requestId: event.requestId }
+							: {
+									requestId: event.requestId,
+									errorReason: "BlockedByClient",
+								},
+					)
+					.catch(() => undefined);
+			});
+			await cdp.send("Fetch.enable", {
+				patterns: [
+					{
+						urlPattern: "*",
+						resourceType: "Document",
+						requestStage: "Request",
+					},
+				],
+			});
+			return cdp;
+		})();
+		session.navigationGuards?.set(page, installing);
+		return installing;
 	}
 
 	private addLog(
@@ -518,8 +614,8 @@ export class JevBrowserManager {
 		session: ActiveBrowserSession,
 		intervalMs: number,
 	) {
-		session.stream = await startStream(session, { intervalMs });
-		emitHostUpdate("stream", { url: session.stream.url });
+		const stream = await startStream(session, { intervalMs });
+		emitHostUpdate("stream", { url: stream.url });
 	}
 }
 

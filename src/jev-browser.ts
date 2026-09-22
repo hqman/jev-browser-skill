@@ -302,7 +302,7 @@ async function observeDocument(page: Page) {
 									e.type,
 								)));
 					if (editable) add("TYPE_TEXT");
-					add("CLICK");
+					if (!(editable && value.trim())) add("CLICK");
 				}
 			}
 			const words: string[] = [];
@@ -426,6 +426,13 @@ async function observeDocument(page: Page) {
 				signal: AbortSignal,
 			) {
 				signal.throwIfAborted();
+				if (operation === "ENTER" && target === undefined) {
+					await page.keyboard.press("Enter");
+					await page
+						.waitForLoadState("domcontentloaded", { timeout: 15_000 })
+						.catch(() => undefined);
+					return;
+				}
 				const nodeHandle = await handle
 					.evaluateHandle((h, target) => {
 						const current = h.read();
@@ -519,9 +526,30 @@ async function observeDocument(page: Page) {
 								.catch(() => undefined);
 						}
 					}
-					else if (operation === "TYPE_TEXT" && element && text !== undefined)
+					else if (operation === "TYPE_TEXT" && element && text !== undefined) {
 						await element.fill(text, { timeout: 2000 });
-					else if (
+						const role = await element.evaluate(
+							(el) =>
+								el.getAttribute("role") ||
+								(el instanceof HTMLInputElement ? el.type : ""),
+						);
+						if (role === "combobox" || role === "searchbox" || role === "search") {
+							const deadline = Date.now() + 400;
+							while (Date.now() < deadline) {
+								signal.throwIfAborted();
+								if (
+									await page.evaluate(
+										() =>
+											!!document.querySelector(
+												'[role="option"],[role="listbox"]',
+											),
+									)
+								)
+									break;
+								await delay(50, undefined, { signal });
+							}
+						}
+					} else if (
 						operation === "SELECT" &&
 						element &&
 						target?.option !== undefined
@@ -538,7 +566,13 @@ async function observeDocument(page: Page) {
 						);
 					else if (operation === "WAIT")
 						await new Promise((resolve) => setTimeout(resolve, 150));
-					else throw new Error("Unsupported observed action.");
+					else if (operation === "ENTER") {
+						if (element) await element.press("Enter", { noWaitAfter: true });
+						else await page.keyboard.press("Enter");
+						await page
+							.waitForLoadState("domcontentloaded", { timeout: 15_000 })
+							.catch(() => undefined);
+					} else throw new Error("Unsupported observed action.");
 				} finally {
 					await nodeHandle.dispose();
 				}

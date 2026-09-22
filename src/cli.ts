@@ -1,11 +1,9 @@
 import { spawn } from "node:child_process";
-import { unlink } from "node:fs/promises";
 import net from "node:net";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-
-const SOCK_PATH = join(homedir(), ".jb", "jb.sock");
+import { daemonConfigFingerprint } from "./daemon-identity.ts";
+import { SOCK_PATH } from "./ipc.ts";
+import { foundPage } from "./summary.ts";
 
 const USAGE = `Usage:
   jb [--session ID] run --goal "…" [--url URL] [--max-steps N] [--headless] [--headed]
@@ -14,7 +12,9 @@ const USAGE = `Usage:
   jb [--session ID] state
   jb [--session ID] logs [--tail N]
   jb [--session ID] stream [--action start|status|stop] [--interval-ms N]
-  jb [--session ID] stop`;
+  jb [--session ID] stop
+  jb shutdown
+  jb --help`;
 
 interface Flags {
 	session: string;
@@ -202,15 +202,7 @@ function spawnDaemon(): void {
 	child.unref();
 }
 
-async function unlinkSock(): Promise<void> {
-	try {
-		await unlink(SOCK_PATH);
-	} catch (err) {
-		if (errCode(err) !== "ENOENT") throw err;
-	}
-}
-
-async function waitForSockGone(timeoutMs = 2000): Promise<void> {
+async function waitForSockGone(timeoutMs = 20_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
 		try {
@@ -219,12 +211,14 @@ async function waitForSockGone(timeoutMs = 2000): Promise<void> {
 		} catch (err) {
 			const code = errCode(err);
 			if (code === "ENOENT" || code === "ECONNREFUSED") {
-				await unlinkSock().catch(() => undefined);
 				return;
 			}
 		}
 		await new Promise((resolve) => setTimeout(resolve, 50));
 	}
+	throw new Error(
+		`Timed out waiting for the jb daemon at ${SOCK_PATH} to finish shutting down.`,
+	);
 }
 
 async function connectAliveDaemon(): Promise<net.Socket | undefined> {
@@ -233,7 +227,11 @@ async function connectAliveDaemon(): Promise<net.Socket | undefined> {
 	} catch (err) {
 		const code = errCode(err);
 		if (code !== "ENOENT" && code !== "ECONNREFUSED") throw err;
-		await unlinkSock().catch(() => undefined);
+		if (code === "ECONNREFUSED") {
+			throw new Error(
+				`Daemon socket is unavailable at ${SOCK_PATH}. jb did not remove it. If no jb process is running, remove the socket and pid file in that directory yourself, then start again.`,
+			);
+		}
 		return undefined;
 	}
 }
@@ -264,6 +262,10 @@ async function ensureDaemon(
 	);
 }
 
+function keepBrowserOpen(status: unknown): boolean {
+	return status !== "done_unverified";
+}
+
 function printRunSummary(data: unknown): void {
 	const d =
 		data && typeof data === "object" ? (data as Record<string, unknown>) : {};
@@ -273,16 +275,21 @@ function printRunSummary(data: unknown): void {
 		d.finalScreenshot && typeof d.finalScreenshot === "object"
 			? (d.finalScreenshot as { artifactPath?: unknown })
 			: undefined;
+	const found = foundPage(d);
+	if (found.url) console.log(`found ${found.url}`);
 	console.log(
 		JSON.stringify(
 			{
 				status: d.status,
+				url: found.url,
+				title: found.title,
 				steps: stepCount,
 				artifactPath: finalScreenshot?.artifactPath,
 				reason: d.message,
 				textRequest: d.textRequest,
 				elapsedMs: d.elapsedMs,
 				tracePath: d.tracePath,
+				sessionClosed: d.sessionClosed,
 			},
 			null,
 			2,
@@ -366,7 +373,7 @@ async function rpc(
 		}
 
 		socket.write(
-			`${JSON.stringify({ id: "1", method, session, params })}\n`,
+			`${JSON.stringify({ id: "1", method, session, params, daemonFingerprint: daemonConfigFingerprint() })}\n`,
 		);
 	});
 }
@@ -426,13 +433,30 @@ function buildParams(flags: Flags): {
 		}
 		case "stop":
 			return { method: "stop", params: {} };
+		case "shutdown":
+			return { method: "shutdown", params: {} };
 		default:
 			fail(`unknown command: ${command}`, true);
 	}
 }
 
+function assertSupportedNode(): void {
+	const [major = 0, minor = 0] = process.versions.node.split(".").map(Number);
+	const supported = major > 22 || (major === 22 && minor >= 18);
+	if (supported) return;
+	console.error(
+		`jb requires Node.js >= 22.18.0 for TypeScript type stripping (this process is ${process.versions.node}).`,
+	);
+	process.exit(1);
+}
+
 async function main(): Promise<void> {
+	assertSupportedNode();
 	const argv = process.argv.slice(2);
+	if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h")) {
+		console.log(USAGE);
+		return;
+	}
 	if (argv.includes("--daemon")) {
 		const { startDaemon } = await import("./server.ts");
 		await startDaemon();
@@ -457,7 +481,7 @@ async function main(): Promise<void> {
 				"No browser is open. Leave the session running after needs_text, then reply.",
 			);
 		}
-		if (method === "stop") {
+		if (method === "stop" || method === "shutdown") {
 			console.log(
 				JSON.stringify({
 					active: false,
@@ -468,9 +492,23 @@ async function main(): Promise<void> {
 		}
 		fail("No jb daemon is running. Start one with `jb run`.");
 	}
-	if (method === "run" || method === "reply") printRunSummary(data);
-	else console.log(JSON.stringify(data, null, 2));
-	if (method === "stop") await waitForSockGone();
+	if (method === "run" || method === "reply") {
+		const record =
+			data && typeof data === "object"
+				? (data as Record<string, unknown>)
+				: {};
+		if (!keepBrowserOpen(record.status)) {
+			const stopped = await rpc("stop", flags.session, {}, false);
+			record.sessionClosed = true;
+			if (stopped && typeof stopped === "object") {
+				const extra = stopped as Record<string, unknown>;
+				if (extra.outputDir !== undefined) record.outputDir = extra.outputDir;
+				if (extra.videoPath !== undefined) record.videoPath = extra.videoPath;
+			}
+		}
+		printRunSummary(record);
+	} else console.log(JSON.stringify(data, null, 2));
+	if (method === "shutdown") await waitForSockGone();
 }
 
 main().catch((err) => {

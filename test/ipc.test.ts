@@ -59,6 +59,9 @@ test("JSON IPC context supports wait batches and plugin-local cancellation", asy
 				context,
 			);
 			assert.equal(run.status, "done_unverified");
+			if (run.initialScreenshot === null) {
+				throw new Error("missing initial screenshot");
+			}
 			assert.ok(existsSync(run.initialScreenshot.artifactPath));
 			assert.ok(
 				run.finalScreenshot && existsSync(run.finalScreenshot.artifactPath),
@@ -67,6 +70,12 @@ test("JSON IPC context supports wait batches and plugin-local cancellation", asy
 				{ goal: "Observe the Ready heading" },
 				context,
 			);
+			if (
+				second.initialScreenshot === null ||
+				run.initialScreenshot === null
+			) {
+				throw new Error("missing initial screenshot");
+			}
 			assert.equal(
 				second.initialScreenshot.state.startedAt,
 				run.initialScreenshot.state.startedAt,

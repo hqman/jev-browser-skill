@@ -37,6 +37,8 @@ export interface TextRequest {
 	role?: string;
 	currentValue: string;
 	url: string;
+	targetId: string;
+	documentId: string;
 	question: string;
 }
 
@@ -98,17 +100,41 @@ export async function typeIntoPendingField(
 ) {
 	const snapshot = await observe(page, signal);
 	try {
-		const target = snapshot.data.targets.find(
-			(item) => item.operation === "TYPE_TEXT" && item.label === pending.label,
-		);
-		if (!target) {
+		const documentId = await currentDocumentId(page);
+		if (
+			snapshot.data.url !== pending.url ||
+			documentId !== pending.documentId
+		) {
 			throw new Error(
-				`Text field ${JSON.stringify(pending.label)} is no longer on the page. Run again.`,
+				"The page changed after text was requested. The saved reply was not entered; run again.",
 			);
 		}
-		await snapshot.execute("TYPE_TEXT", target, text, signal);
+		const matches = snapshot.data.targets.filter(
+			(item) =>
+				item.operation === "TYPE_TEXT" &&
+				item.id === pending.targetId &&
+				item.label === pending.label &&
+				item.role === pending.role &&
+				item.value === pending.currentValue,
+		);
+		if (matches.length !== 1) {
+			throw new Error(
+				`Text field ${JSON.stringify(pending.label)} changed or is ambiguous. The saved reply was not entered; run again.`,
+			);
+		}
+		await snapshot.execute("TYPE_TEXT", matches[0], text, signal);
 	} finally {
 		await snapshot.dispose().catch(() => undefined);
+	}
+}
+
+async function currentDocumentId(page: Page): Promise<string> {
+	const cdp = await page.context().newCDPSession(page);
+	try {
+		const tree = await cdp.send("Page.getFrameTree");
+		return tree.frameTree.frame.loaderId;
+	} finally {
+		await cdp.detach().catch(() => undefined);
 	}
 }
 
@@ -194,7 +220,6 @@ export async function runJev(
 			});
 			memory.actions.splice(0, Math.max(0, memory.actions.length - 10));
 			options.textReply = undefined;
-			await delay(150, undefined, { signal });
 		}
 		for (
 			let evaluation = 1;
@@ -242,7 +267,7 @@ export async function runJev(
 					status: "decision",
 					latencyMs: Math.round(performance.now() - decisionStarted),
 				});
-				if (!["CLICK", "SELECT"].includes(decision.operation))
+				if (!["CLICK", "SELECT", "ENTER"].includes(decision.operation))
 					await snapshot.assertFresh();
 				if (page !== options.page())
 					throw new StaleObservationError("Active tab changed.");
@@ -280,6 +305,8 @@ export async function runJev(
 						role: decision.target.role,
 						currentValue: decision.target.value,
 						url: snapshot.data.url,
+						targetId: decision.target.id,
+						documentId: await currentDocumentId(page),
 						question: textQuestion(
 							decision.target.label,
 							decision.target.value,
@@ -322,10 +349,7 @@ export async function runJev(
 				await delay(
 					decision.target?.role === "radio" || decision.operation === "SELECT"
 						? 600
-						: decision.operation === "TYPE_TEXT" ||
-								decision.operation.startsWith("SCROLL")
-							? 150
-							: 350,
+						: 150,
 					undefined,
 					{
 						signal,
