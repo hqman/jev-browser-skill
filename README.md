@@ -1,4 +1,4 @@
-# jb
+![JEV-BROWSER-SKILL: Give a site. Write a goal. Jev clicks.](assets/jev-cover.png)
 
 Isolated Playwright Chromium driven by Jev. A coding agent (or you) runs a
 narrowly scoped browser goal; Jev chooses in-page actions. The default
