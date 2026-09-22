@@ -18,65 +18,27 @@ repository, then `npm install` only to fetch dependencies.
 
 ## Install
 
-From this repository:
-
 ```bash
+git clone git@github.com:hqman/jev-browser-skill.git
+cd jev-browser-skill
 npm install
 npx playwright install chromium
 ```
 
-Credentials live in `~/.jb/config.json` (see `config.example.json`) or env:
-
-- `provider`: `"gateway"` (default) or `"typesafe"`; override with `JB_PROVIDER`
-- Gateway: `AI_GATEWAY_API_KEY` or `gateway.apiKey`
-- TypeSafe: `TYPESAFE_API_KEY` or `typesafe.apiKey` (optional `TYPESAFE_MODEL`, default `jev-latest`)
-
-When Jev selects a text field, the run stops with `needs_text` and leaves the
-browser open. Answer with the same session:
-
-```bash
-./bin/jb --session <id> reply --text "the value"
-```
-
-Do not stop the browser between that question and the reply. `done_unverified`
-closes the session after the final screenshot. Config: `~/.jb/config.json`.
-Artifacts: `~/.jb/data`.
-
-From this repository, `./bin/jb` is the command. From any other working
-directory, use the skill launcher described below. A relative `./bin/jb`
-only works when the current directory is this clone.
-
-## Install the skill
-
-In this repository, `AGENTS.md` points at
-[`skills/jev-browser/SKILL.md`](skills/jev-browser/SKILL.md). That is how
-Cursor loads the skill when this repo is the workspace. The skill name is
-`jb-browser`.
-
-The command that works outside this clone is the launcher
-`skills/jev-browser/bin/jb`. It resolves symlinks and executes this
-repository's `bin/jb`. Link the skill directory; do not copy it away from
-the clone.
-
-To use it from another Cursor project:
-
-```bash
-mkdir -p .cursor/skills
-ln -s /absolute/path/to/jev-browser-skill/skills/jev-browser .cursor/skills/jb-browser
-```
-
-For every Cursor project on this machine:
+The skill is [`skills/jev-browser/SKILL.md`](skills/jev-browser/SKILL.md). Name:
+`jb-browser`. `AGENTS.md` in this clone loads it. The script is `./bin/jb`, or
+`skills/jev-browser/bin/jb` from any working directory (follow the symlink).
+Do not copy the skill folder away from this clone.
 
 ```bash
 mkdir -p ~/.cursor/skills
 ln -s /absolute/path/to/jev-browser-skill/skills/jev-browser ~/.cursor/skills/jb-browser
 ```
 
-Then run the launcher by its real path, from any working directory:
-
-```bash
-/absolute/path/to/jev-browser-skill/skills/jev-browser/bin/jb --help
-```
+Credentials: `~/.jb/config.json` (see `config.example.json`) or env.
+`provider` is `gateway` (default) or `typesafe`. Gateway:
+`AI_GATEWAY_API_KEY` / `gateway.apiKey`. TypeSafe: `TYPESAFE_API_KEY` /
+`typesafe.apiKey`. Artifacts: `~/.jb/data`.
 
 ## Example
 
