@@ -28,11 +28,19 @@ npx playwright install chromium
 The skill is [`skills/jev-browser/SKILL.md`](skills/jev-browser/SKILL.md). Name:
 `jb-browser`. `AGENTS.md` in this clone loads it. The script is `./bin/jb`, or
 `skills/jev-browser/bin/jb` from any working directory (follow the symlink).
-Do not copy the skill folder away from this clone.
+Do not copy the skill folder away from this clone. This repo already has:
+
+```
+.cursor/skills/jb-browser -> ../../skills/jev-browser
+.agents/skills/jb-browser -> ../../skills/jev-browser
+```
+
+For every project on this machine:
 
 ```bash
-mkdir -p ~/.cursor/skills
+mkdir -p ~/.cursor/skills ~/.agents/skills
 ln -s /absolute/path/to/jev-browser-skill/skills/jev-browser ~/.cursor/skills/jb-browser
+ln -s /absolute/path/to/jev-browser-skill/skills/jev-browser ~/.agents/skills/jb-browser
 ```
 
 Credentials: `~/.jb/config.json` (see `config.example.json`) or env.
