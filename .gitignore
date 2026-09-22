@@ -15,3 +15,5 @@ playwright/.cache
 demo/
 output/
 execplan/
+.agents/
+.cursor/
