@@ -11,10 +11,10 @@ local command is `jb`.
 Requires **Node.js 22.18.0 or newer** (type stripping). Node 24 works.
 Earlier Node 22 releases do not provide `--experimental-strip-types`.
 
-This package is not published. `package.json` is `private`, and
-`npm publish` is refused until the upstream license conflict in
-[NOTICE](NOTICE) is resolved. `jev-browser` and `jb` on npm are different
-packages. Install from a clone of this repository.
+Distribute it as this GitHub clone: the `jb-browser` skill plus the `jb`
+script. It is not an npm package. `package.json` is `private`; `npm publish`
+is refused. `jev-browser` and `jb` on npm are unrelated. Clone this
+repository, then `npm install` only to fetch dependencies.
 
 ## Install
 
@@ -127,5 +127,4 @@ affiliated with or endorsed by Cline. Differences (CLI/daemon, `needs_text` +
 
 At that commit the `cline/plugins` root LICENSE is Apache-2.0, Copyright 2026
 Cline Bot Inc., and `plugins/jev-browser/package.json` says MIT. This
-repository does not treat that as a dual license. Publication waits on
-upstream clarification.
+repository does not treat that as a dual license and is not published to npm.
