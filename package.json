@@ -1,0 +1,28 @@
+{
+  "name": "jb",
+  "version": "0.1.0",
+  "description": "Isolated Playwright browser CLI driven by Jev via Vercel AI Gateway.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "jb": "./bin/jb"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "install-browser": "playwright install chromium"
+  },
+  "dependencies": {
+    "@ai-sdk/gateway": "4.0.85",
+    "ai": "7.0.105",
+    "playwright": "^1.58.2",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "typescript": "^5.9.3"
+  }
+}

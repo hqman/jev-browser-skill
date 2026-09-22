@@ -1,0 +1,12 @@
+node_modules
+dist
+coverage
+.env
+artifacts
+screenshots
+videos
+*.webm
+*.jsonl
+.playwright
+playwright/.cache
+.cache/ms-playwright

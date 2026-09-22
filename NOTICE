@@ -1,0 +1,9 @@
+This work is derived from the Cline plugin `jev-browser` in the cline/plugins
+repository (https://github.com/cline/plugins) at commit
+96bde661f630ec23c1ce0cd86a2361a9959ef65a ("Add Jev Browser plugin (#230)").
+
+The original plugin is licensed under the Apache License, Version 2.0.
+Copyright 2026 Cline Bot Inc.
+
+This distribution is also licensed under the Apache License, Version 2.0.
+Copyright 2026 hqman.

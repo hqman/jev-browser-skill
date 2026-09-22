@@ -1,0 +1,18 @@
+{
+  "allowedOrigins": ["http://*", "https://*"],
+  "headless": true,
+  "recordVideo": true,
+  "showCursor": true,
+  "showClickIndicators": true,
+  "outputDir": "~/.jb/data",
+  "viewport": { "width": 1280, "height": 720 },
+  "stream": { "enabled": false, "intervalMs": 1000 },
+  "provider": "gateway",
+  "gateway": {
+    "apiKey": ""
+  },
+  "typesafe": {
+    "apiKey": "",
+    "model": "jev-latest"
+  }
+}

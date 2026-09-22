@@ -1,0 +1,17 @@
+{
+  "allowedOrigins": [
+    "http://localhost:*",
+    "http://127.0.0.1:*"
+  ],
+  "headless": true,
+  "recordVideo": true,
+  "outputDir": "/tmp/jb-smoke",
+  "viewport": {
+    "width": 800,
+    "height": 600
+  },
+  "stream": {
+    "enabled": false,
+    "intervalMs": 1000
+  }
+}
